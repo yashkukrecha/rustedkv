@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct Value {
@@ -7,6 +7,7 @@ pub struct Value {
     pub clock: u64
 }
 
+#[derive(Debug)]
 pub struct Store {
     inner: RwLock<HashMap<String, Value>>
 }
@@ -18,13 +19,13 @@ impl Store {
         }
     }
 
-    pub fn put(&self, key: String, value: String, clock: u64) {
-        let mut map = self.inner.write().unwrap();
+    pub async fn put(&self, key: String, value: String, clock: u64) {
+        let mut map = self.inner.write().await;
         map.insert(key, Value { data: value, clock });
     }
 
-    pub fn get(&self, key: &str) -> Option<Value> {
-        let map = self.inner.read().unwrap();
+    pub async fn get(&self, key: &str) -> Option<Value> {
+        let map = self.inner.read().await;
         map.get(key).cloned()
     }
 }

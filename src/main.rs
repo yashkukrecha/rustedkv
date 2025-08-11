@@ -1,16 +1,41 @@
-pub mod config;
-pub mod cluster;
+mod api;
+mod cluster;
+mod store;
+mod config;
+mod util;
 
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use clap::Parser;
-use std::any::type_name;
-use crate::config::CliArgs;
+
+use crate::api::ApiState;
 use crate::cluster::ClusterState;
+use crate::config::CliArgs;
+use crate::store::engine::Store;
+use crate::store::lamport::LamportClock;
 
-fn type_of<T>(_: &T) -> &str {
-    std::any::type_name::<T>()
-}
-
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
-    let cluster_state = ClusterState::from_args(args);
+
+    // Build core state
+    let store = Arc::new(Store::new());
+    let clock = Arc::new(LamportClock::new(0));
+    let cluster = Arc::new(RwLock::new(ClusterState::from(args)));
+
+    // Assemble API state
+    let state = ApiState { 
+        store: Arc::clone(&store), 
+        clock: Arc::clone(&clock), 
+        cluster: Arc::clone(&cluster),
+    };
+
+    // TODO: Router::with_state(state.clone()) and spawn background tasks
+    // axum::Server::bind(&addr).serve(app.into_make_service()).await?;
+
+    let c = cluster.read().await;
+    println!("{:#?}", *c);
+
+    Ok(())
 }
+
