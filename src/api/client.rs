@@ -8,6 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use crate::api::{ApiState, Metrics};
 use crate::store::{LamportClock, read_clock};
+use crate::util::{LogEntry, Operation};
 
 pub struct RouterBuilder;
 
@@ -27,12 +28,23 @@ pub struct PutBody {
     pub value: String,
 }
 
+
 async fn put_key(
     State(state): State<ApiState>,
     Path(key): Path<String>,
     Json(body): Json<PutBody>,
 ) -> Response {
     let ts = read_clock(&state.clock).await;
+    let log_entry = LogEntry {
+        timestamp: ts,
+        operation: Operation::Put { key: key.clone(), value: body.value.clone() },
+    };
+
+    {
+        let mut wal = state.wal.lock().await;
+        wal.append_sync(&log_entry).unwrap();
+    }
+
     let store = state.store;
     store.put(key, body.value, ts).await;
 
@@ -73,8 +85,18 @@ async fn delete_key(
     State(state): State<ApiState>,
     Path(key): Path<String>,
 ) -> Response {
-    let store = state.store;
+    let ts = read_clock(&state.clock).await;
+    let log_entry = LogEntry {
+        timestamp: ts,
+        operation: Operation::Delete { key: key.clone() },
+    };
 
+    {
+        let mut wal = state.wal.lock().await;
+        wal.append_sync(&log_entry).unwrap();
+    }
+
+    let store = state.store;
     let (status, resp): (axum::http::StatusCode, Response) = if let Some(_val) = store.delete(&key).await {
         state.metrics.kv_ops.with_label_values(&["delete"]).inc();
         (axum::http::StatusCode::OK, axum::http::StatusCode::OK.into_response())

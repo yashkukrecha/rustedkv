@@ -1,6 +1,7 @@
 use crate::util::{LogEntry, Operation};
 use std::{fs::{File, OpenOptions}, io::{BufReader, BufRead, BufWriter, Write, self}, path::{Path, PathBuf}};
 
+#[derive(Debug)]
 pub struct Wal {
     path: PathBuf,
     writer: BufWriter<File>,
@@ -71,7 +72,7 @@ pub fn replay_wal<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<LogEntry>> {
                 eprintln!("Error reading WAL at line {}: {}", idx + 1, e);
                 break; 
             }
-        }
+        };
 
         if line.trim().is_empty() {
             continue;
