@@ -24,9 +24,9 @@ distributed-key-value-store/
 │   │   └── handler.rs         # Handles /replicate-batch endpoint
 │   ├── api/                   # HTTP routes and handlers
 │   │   ├── mod.rs
-│   │   ├── client.rs          # PUT/GET/DELETE routes
-│   │   ├── internal.rs        # /internal/* endpoints like /replicate, /ping
-│   │   └── metrics.rs         # Prometheus metrics export
+│   │   ├── client.rs          # API endpoints
+│   │   ├── state.rs           # ApiState definition
+│   │   └── metrics.rs         # Prometheus metrics definition
 │   ├── cli/                   # CLI client implementation
 │   │   ├── mod.rs
 │   │   └── client.rs          # Interacts with the cluster (put/get/delete)

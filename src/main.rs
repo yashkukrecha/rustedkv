@@ -4,11 +4,12 @@ mod store;
 mod config;
 mod util;
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::{sync::Arc, net::SocketAddr};
+use axum::serve;
+use tokio::{sync::RwLock, net::TcpListener};
 use clap::Parser;
 
-use crate::api::ApiState;
+use crate::api::{ApiState, Metrics, RouterBuilder};
 use crate::cluster::ClusterState;
 use crate::config::CliArgs;
 use crate::store::engine::Store;
@@ -28,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
         store: Arc::clone(&store), 
         clock: Arc::clone(&clock), 
         cluster: Arc::clone(&cluster),
+        metrics: Metrics::new(),
     };
 
     // TODO: Router::with_state(state.clone()) and spawn background tasks
@@ -35,6 +37,14 @@ async fn main() -> anyhow::Result<()> {
 
     let c = cluster.read().await;
     println!("{:#?}", *c);
+
+    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
+    let app = RouterBuilder::with_state(state);
+
+    println!("Listening on {}", addr);
+
+    let listener = TcpListener::bind(addr).await?;
+    serve(listener, app).await?;
 
     Ok(())
 }

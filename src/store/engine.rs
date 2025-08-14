@@ -28,4 +28,9 @@ impl Store {
         let map = self.inner.read().await;
         map.get(key).cloned()
     }
+
+    pub async fn delete(&self, key: &str) -> Option<Value> {
+        let mut map = self.inner.write().await;
+        map.remove(key)
+    }
 }
