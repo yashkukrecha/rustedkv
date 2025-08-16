@@ -11,4 +11,5 @@ pub struct ApiState {
     pub cluster: Arc<RwLock<ClusterState>>,
     pub metrics: Metrics,
     pub wal: Arc<Mutex<Wal>>,
+    pub chaos_before_sync_ms: u64,
 }

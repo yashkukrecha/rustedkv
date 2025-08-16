@@ -8,6 +8,7 @@ pub enum Operation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
-    pub timestamp: u64,
+    pub ts: u64,
+    pub node_id: u64, // used for tie-breaking in Lamport clocks
     pub operation: Operation,
 }

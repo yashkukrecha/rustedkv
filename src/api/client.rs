@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use crate::api::{ApiState, Metrics};
-use crate::store::{LamportClock, read_clock};
+use crate::store::{LamportClock};
 use crate::util::{LogEntry, Operation};
 
 pub struct RouterBuilder;
@@ -34,19 +34,29 @@ async fn put_key(
     Path(key): Path<String>,
     Json(body): Json<PutBody>,
 ) -> Response {
-    let ts = read_clock(&state.clock).await;
+    let ts = state.clock.tick_send();
+    let node_id = state.cluster.read().await.node_id;
     let log_entry = LogEntry {
-        timestamp: ts,
+        ts: ts,
+        node_id: node_id,
         operation: Operation::Put { key: key.clone(), value: body.value.clone() },
     };
 
     {
         let mut wal = state.wal.lock().await;
+
+        // TESTING: chaos injection
+        // wal.append(&log_entry).unwrap();
+        // if state.chaos_before_sync_ms > 0 {
+        //     tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
+        // }
+        // wal.sync().unwrap();
+
         wal.append_sync(&log_entry).unwrap();
     }
 
     let store = state.store;
-    store.put(key, body.value, ts).await;
+    store.put(key, body.value, ts, node_id).await;
 
     state.metrics.requests.with_label_values(&["PUT", "/key/:key", "200"]).inc();
     state.metrics.kv_ops.with_label_values(&["put"]).inc();
@@ -55,9 +65,9 @@ async fn put_key(
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetResp<'a> {
-    value: &'a str,
-    clock: u64,
+pub struct GetResp {
+    value: Option<String>,
+    ts: u64,
 }
 
 async fn get_key(
@@ -68,7 +78,7 @@ async fn get_key(
 
     let (status, resp): (axum::http::StatusCode, Response) = if let Some(val) = store.get(&key).await {
         state.metrics.kv_ops.with_label_values(&["get"]).inc();
-        let body = GetResp { value: &val.data.clone(), clock: val.clock };
+        let body = GetResp { value: val.data.clone(), ts: val.ts };
         (axum::http::StatusCode::OK, (axum::http::StatusCode::OK, Json(body)).into_response())
     } else {
         state.metrics.errors.with_label_values(&["not_found"]).inc();
@@ -85,19 +95,29 @@ async fn delete_key(
     State(state): State<ApiState>,
     Path(key): Path<String>,
 ) -> Response {
-    let ts = read_clock(&state.clock).await;
+    let ts = state.clock.tick_send();
+    let node_id = state.cluster.read().await.node_id;
     let log_entry = LogEntry {
-        timestamp: ts,
+        ts: ts,
+        node_id: node_id,
         operation: Operation::Delete { key: key.clone() },
     };
 
     {
         let mut wal = state.wal.lock().await;
+
+        // TESTING: chaos injection
+        // wal.append(&log_entry).unwrap();
+        // if state.chaos_before_sync_ms > 0 {
+        //     tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
+        // }
+        // wal.sync().unwrap();
+
         wal.append_sync(&log_entry).unwrap();
     }
 
     let store = state.store;
-    let (status, resp): (axum::http::StatusCode, Response) = if let Some(_val) = store.delete(&key).await {
+    let (status, resp): (axum::http::StatusCode, Response) = if let Some(_val) = store.delete(&key, ts, node_id).await {
         state.metrics.kv_ops.with_label_values(&["delete"]).inc();
         (axum::http::StatusCode::OK, axum::http::StatusCode::OK.into_response())
     } else {
@@ -112,28 +132,30 @@ async fn delete_key(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ReplicateItem {
-    key: String,
-    value: String,
-    clock: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct ReplicateBody {
-    entries: Vec<ReplicateItem>
+    entries: Vec<LogEntry>
 }
 
 async fn replicate(
     State(state): State<ApiState>,
     Json(body): Json<ReplicateBody>,
 ) -> Response {
-    let store = state.store;
-    for item in body.entries {
-        match store.get(&item.key).await {
-            Some(existing) if existing.clock >= item.clock => {},
-            _ => {
-                store.put(item.key, item.value, item.clock).await;
+    for entry in body.entries {
+        state.clock.tick_observe(entry.ts);
+
+        {
+            let mut wal = state.wal.lock().await;
+            wal.append_sync(&entry).unwrap();
+        }
+
+        match entry.operation {
+            Operation::Put { key, value } => {
+                state.store.put(key, value, entry.ts, entry.node_id).await;
                 state.metrics.kv_ops.with_label_values(&["put"]).inc();
+            }
+            Operation::Delete { key } => {
+                state.store.delete(&key, entry.ts, entry.node_id).await;
+                state.metrics.kv_ops.with_label_values(&["delete"]).inc();
             }
         }
     }
