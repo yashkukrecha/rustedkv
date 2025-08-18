@@ -27,13 +27,9 @@ distributed-key-value-store/
 │   │   ├── client.rs          # API endpoints
 │   │   ├── state.rs           # ApiState definition
 │   │   └── metrics.rs         # Prometheus metrics definition
-│   ├── cli/                   # CLI client implementation
-│   │   ├── mod.rs
-│   │   └── client.rs          # Interacts with the cluster (put/get/delete)
 │   ├── util/                  # Common types & helpers
 │   │   ├── mod.rs
 │   │   └── types.rs           # Shared types: Value, Request, NodeID, etc.
-│   └── logger.rs              # Logging setup (e.g., tracing or log crate)
 ├── Cargo.toml
 ├── README.md
 └── scripts/

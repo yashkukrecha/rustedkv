@@ -12,10 +12,13 @@ impl LamportClock {
         }
     }
 
+    // when sending a message, increment the clock and return the new timestamp
     pub fn tick_send(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    // when receiving a message with timestamp ts, update the clock
+    // to max(current, ts) + 1 and return the new timestamp
     pub fn tick_recv(&self, ts: u64) -> u64 {
         loop {
             let current = self.counter.load(Ordering::SeqCst);
@@ -26,6 +29,7 @@ impl LamportClock {
         }
     }
 
+    // when observing a message with timestamp ts, update the clock
     pub fn tick_observe(&self, ts: u64) {
         loop {
             let current = self.counter.load(Ordering::SeqCst);
@@ -39,6 +43,7 @@ impl LamportClock {
         }
     }
 
+    // get the current timestamp without modifying the clock
     pub fn tick_now(&self) -> u64 {
         self.counter.load(Ordering::SeqCst)
     }

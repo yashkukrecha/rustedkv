@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::{ApiState, Metrics};
 use crate::store::{LamportClock};
 use crate::util::{LogEntry, Operation};
+use crate::replication::ReplicateBody;
 
 pub struct RouterBuilder;
 
@@ -45,18 +46,21 @@ async fn put_key(
     {
         let mut wal = state.wal.lock().await;
 
-        // TESTING: chaos injection
-        // wal.append(&log_entry).unwrap();
-        // if state.chaos_before_sync_ms > 0 {
-        //     tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
-        // }
-        // wal.sync().unwrap();
-
-        wal.append_sync(&log_entry).unwrap();
+        // tests chaos injection
+        wal.append(&log_entry).unwrap();
+        if state.chaos_before_sync_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
+        }
+        wal.sync().unwrap();
     }
 
     let store = state.store;
     store.put(key, body.value, ts, node_id).await;
+
+    let leader_id = state.cluster.read().await.leader_id;
+    if node_id == leader_id {
+        state.rep_tx.send(log_entry).await;
+    }
 
     state.metrics.requests.with_label_values(&["PUT", "/key/:key", "200"]).inc();
     state.metrics.kv_ops.with_label_values(&["put"]).inc();
@@ -106,14 +110,12 @@ async fn delete_key(
     {
         let mut wal = state.wal.lock().await;
 
-        // TESTING: chaos injection
-        // wal.append(&log_entry).unwrap();
-        // if state.chaos_before_sync_ms > 0 {
-        //     tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
-        // }
-        // wal.sync().unwrap();
-
-        wal.append_sync(&log_entry).unwrap();
+        // tests chaos injection
+        wal.append(&log_entry).unwrap();
+        if state.chaos_before_sync_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
+        }
+        wal.sync().unwrap();
     }
 
     let store = state.store;
@@ -125,29 +127,32 @@ async fn delete_key(
         (axum::http::StatusCode::NOT_FOUND, axum::http::StatusCode::NOT_FOUND.into_response())
     };
 
+    let leader_id = state.cluster.read().await.leader_id;
+    if node_id == leader_id {
+        state.rep_tx.send(log_entry).await;
+    }
+
     let status_label = if status == axum::http::StatusCode::OK { "200" } else { "404" };
     state.metrics.requests.with_label_values(&["DELETE", "/key/:key", status_label]).inc();
 
     resp
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ReplicateBody {
-    entries: Vec<LogEntry>
-}
-
 async fn replicate(
     State(state): State<ApiState>,
-    Json(body): Json<ReplicateBody>,
+    Json(body): Json<ReplicateBody>, 
 ) -> Response {
-    for entry in body.entries {
-        state.clock.tick_observe(entry.ts);
 
-        {
-            let mut wal = state.wal.lock().await;
-            wal.append_sync(&entry).unwrap();
+    {
+        let mut wal = state.wal.lock().await;
+        for entry in &body.entries {
+            wal.append(&entry).unwrap();
         }
+        wal.sync().unwrap();
+    }
 
+    for entry in body.entries {
+        state.clock.tick_recv(entry.ts);
         match entry.operation {
             Operation::Put { key, value } => {
                 state.store.put(key, value, entry.ts, entry.node_id).await;

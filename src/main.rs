@@ -3,22 +3,24 @@ mod cluster;
 mod store;
 mod config;
 mod util;
+mod replication;
 
 use std::{env, sync::Arc, net::SocketAddr};
 use axum::serve;
-use tokio::{sync::{RwLock, Mutex}, net::TcpListener};
+use tokio::{sync::{mpsc, RwLock, Mutex}, net::TcpListener};
 use clap::Parser;
 
 use crate::api::{ApiState, Metrics, RouterBuilder};
 use crate::cluster::ClusterState;
 use crate::config::CliArgs;
 use crate::store::{Store, LamportClock, Wal, recover_from_snapshot_and_wal};
+use crate::replication::{spawn_leader_replicator};
 
 // Testing chaos configuration
 #[derive(Clone, Debug)]
 struct ChaosCfg {
-    /// If >0, sleep this many milliseconds AFTER WAL append and BEFORE fsync.
-    /// Lets you kill the process and produce a torn final record.
+    // If > 0, sleep this many milliseconds AFTER WAL append and BEFORE fsync.
+    // Lets you kill the process and produce a torn final record.
     before_sync_ms: u64,
 }
 
@@ -52,7 +54,17 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(store);
     let clock = Arc::new(clock);
     let wal = Arc::new(Mutex::new(Wal::open(&wal_path)?));
+    let (rep_tx, rep_rx) = mpsc::channel::<util::LogEntry>(4096);
     let chaos = ChaosCfg::from_env();
+
+    let leader_id = { cluster.read().await.leader_id };
+    let node_id = { cluster.read().await.node_id };
+
+    if node_id == leader_id {
+        spawn_leader_replicator(Arc::clone(&cluster), rep_rx);
+    } else {
+        drop(rep_rx); // non-leaders don't replicate
+    }
 
     // Assemble API state
     let state = ApiState { 
@@ -61,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         cluster: Arc::clone(&cluster),
         metrics: Metrics::new(),
         wal: Arc::clone(&wal),
+        rep_tx: rep_tx,
         chaos_before_sync_ms: chaos.before_sync_ms,
     };
 
