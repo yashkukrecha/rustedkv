@@ -19,6 +19,7 @@ impl RouterBuilder {
             .route("/key/:key", put(put_key).get(get_key).delete(delete_key))
             .route("/replicate", post(replicate))
             .route("/ping", get(ping))
+            .route("/health", get(health))
             .route("/metrics", get(metrics))
             .with_state(state)
     }
@@ -171,6 +172,11 @@ async fn replicate(
 
 async fn ping() -> Response {
     (axum::http::StatusCode::OK, "pong").into_response()
+}
+
+async fn health(State(state): State<ApiState>) -> Response {
+    let is_alive = state.cluster.read().await.is_alive.clone();
+    (axum::http::StatusCode::OK, axum::Json(is_alive)).into_response()
 }
 
 async fn metrics(State(state): State<ApiState>) -> Response {

@@ -5,10 +5,11 @@ mod config;
 mod util;
 mod replication;
 
-use std::{env, sync::Arc, net::SocketAddr};
+use std::{collections::HashMap, time::Duration, env, sync::Arc, net::SocketAddr};
 use axum::serve;
-use tokio::{sync::{mpsc, RwLock, Mutex}, net::TcpListener};
+use tokio::{time::{interval, MissedTickBehavior}, sync::{mpsc, RwLock, Mutex}, net::TcpListener};
 use clap::Parser;
+use reqwest::Client;
 
 use crate::api::{ApiState, Metrics, RouterBuilder};
 use crate::cluster::ClusterState;
@@ -32,6 +33,41 @@ impl ChaosCfg {
             .unwrap_or(0);
         Self { before_sync_ms: val }
     }
+}
+
+fn spawn_heartbeat(cluster: Arc<RwLock<ClusterState>>) {
+    println!("Spawning heartbeat task...");
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("reqwest client");
+
+    tokio::spawn(async move {
+        println!("Heartbeat task started");
+        let mut ticker = interval(Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            ticker.tick().await;
+            let c = cluster.read().await;
+            let address = c.address.clone();
+            let peers = c.peer_addresses.clone();
+            drop(c);
+
+            let mut new_alive = HashMap::new();
+            new_alive.insert(address.clone(), true);
+            for peer in peers {
+                let url = format!("{}/ping", peer.trim_end_matches('/'));
+                println!("Pinging {}", url);
+                let is_up = client.get(&url).send().await.is_ok();
+                new_alive.insert(peer, is_up);
+            }
+
+            let mut c = cluster.write().await;
+            c.is_alive = new_alive;
+            drop(c);
+        }
+    });
 }
 
 #[tokio::main]
@@ -77,6 +113,9 @@ async fn main() -> anyhow::Result<()> {
         chaos_before_sync_ms: chaos.before_sync_ms,
     };
 
+    // Heartbeat
+    spawn_heartbeat(Arc::clone(&cluster));
+
     // Startup
     let c = cluster.read().await;
     println!(
@@ -89,7 +128,8 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = {
         // Prefer ClusterState’s addr if you already store it there
         let c = cluster.read().await;
-        c.address.parse()?
+        let addr_str = c.address.strip_prefix("http://").unwrap_or(&c.address);
+        addr_str.parse()?
     };
     let app = RouterBuilder::with_state(state);
 
