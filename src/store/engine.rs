@@ -9,7 +9,7 @@ pub struct Value {
 }
 
 impl Value {
-    fn is_newer_than(&self, other: Option<&Value>) -> bool {
+    pub fn is_newer_than(&self, other: Option<&Value>) -> bool {
         match other {
             None => true,
             Some(v) => (self.ts > v.ts) || (self.ts == v.ts && self.node_id > v.node_id),

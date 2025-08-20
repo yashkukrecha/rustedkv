@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use crate::api::{ApiState, Metrics};
-use crate::store::{LamportClock};
+use crate::store::{LamportClock, Value};
 use crate::util::{LogEntry, Operation};
 use crate::replication::ReplicateBody;
 use crate::cluster::{quorum_write, quorum_read};
@@ -109,10 +109,15 @@ async fn get_key(
     let result = quorum_read(key.clone(), local_value.clone(), peers, read_quorum).await;
     match result {
         Ok(fresh) => {
+            let status = if fresh.data.is_some() {
+                axum::http::StatusCode::OK
+            } else {
+                axum::http::StatusCode::NOT_FOUND
+            };
             state.metrics.kv_ops.with_label_values(&["get"]).inc();
             state.metrics.requests.with_label_values(&["GET", "/key/:key", "200"]).inc();
             let body = GetResp { value: fresh.data, ts: fresh.ts };
-            (axum::http::StatusCode::OK, Json(body)).into_response()
+            (status, Json(body)).into_response()
         },
         Err(()) => {
             state.metrics.errors.with_label_values(&["quorum_read"]).inc();
@@ -180,15 +185,41 @@ async fn replicate(
     Json(body): Json<ReplicateBody>, 
 ) -> Response {
 
+    // only add fresh entries to WAL and store
+    let mut to_apply = Vec::with_capacity(body.entries.len());
+    for entry in &body.entries {
+        match &entry.operation {
+            Operation::Put { key, value } => {
+                let cur = state.store.get(key).await;
+                let incoming = Value { data: None, ts: entry.ts, node_id: entry.node_id };
+                if incoming.is_newer_than(cur.as_ref()) {
+                    to_apply.push(entry.clone());
+                }
+            }
+            Operation::Delete { key } => {
+                let cur = state.store.get(key).await;
+                let incoming = Value { data: None, ts: entry.ts, node_id: entry.node_id };
+                if incoming.is_newer_than(cur.as_ref()) {
+                    to_apply.push(entry.clone());
+                }
+            }
+        }
+    }
+
+    if to_apply.is_empty() {
+        state.metrics.requests.with_label_values(&["POST", "/replicate", "200"]).inc();
+        return (axum::http::StatusCode::OK).into_response();
+    }
+
     {
         let mut wal = state.wal.lock().await;
-        for entry in &body.entries {
+        for entry in &to_apply {
             wal.append(&entry).unwrap();
         }
         wal.sync().unwrap();
     }
 
-    for entry in body.entries {
+    for entry in to_apply {
         state.clock.tick_recv(entry.ts);
         match entry.operation {
             Operation::Put { key, value } => {
