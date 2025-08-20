@@ -10,6 +10,7 @@ use crate::api::{ApiState, Metrics};
 use crate::store::{LamportClock};
 use crate::util::{LogEntry, Operation};
 use crate::replication::ReplicateBody;
+use crate::cluster::{quorum_write, quorum_read};
 
 pub struct RouterBuilder;
 
@@ -58,8 +59,18 @@ async fn put_key(
     let store = state.store;
     store.put(key, body.value, ts, node_id).await;
 
-    let leader_id = state.cluster.read().await.leader_id;
+    let cluster = state.cluster.read().await;
+    let peers = cluster.peer_addresses.clone();
+    let total_nodes = peers.len() + 1;
+    let write_quorum = (total_nodes / 2) + 1;
+    let leader_id = cluster.leader_id;
+    drop(cluster);
+
     if node_id == leader_id {
+        if let Err(()) = quorum_write(log_entry.clone(), peers, write_quorum).await {
+            state.metrics.errors.with_label_values(&["quorum_write"]).inc();
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response();
+        }
         state.rep_tx.send(log_entry).await;
     }
 
@@ -80,20 +91,34 @@ async fn get_key(
     Path(key): Path<String>,
 ) -> Response {
     let store = state.store;
-
-    let (status, resp): (axum::http::StatusCode, Response) = if let Some(val) = store.get(&key).await {
-        state.metrics.kv_ops.with_label_values(&["get"]).inc();
-        let body = GetResp { value: val.data.clone(), ts: val.ts };
-        (axum::http::StatusCode::OK, (axum::http::StatusCode::OK, Json(body)).into_response())
-    } else {
-        state.metrics.errors.with_label_values(&["not_found"]).inc();
-        (axum::http::StatusCode::NOT_FOUND, axum::http::StatusCode::NOT_FOUND.into_response())
+    let local_value = match store.get(&key).await {
+        Some(val) => val,
+        None => {
+            let ts = 0;
+            let node_id = state.cluster.read().await.node_id;
+            crate::store::Value { data: None, ts, node_id }
+        }
     };
 
-    let status_label = if status == axum::http::StatusCode::OK { "200" } else { "404" };
-    state.metrics.requests.with_label_values(&["GET", "/key/:key", status_label]).inc();
+    let cluster = state.cluster.read().await;
+    let peers = cluster.peer_addresses.clone();
+    let total_nodes = peers.len() + 1;
+    let read_quorum = (total_nodes / 2) + 1;
+    drop(cluster);
 
-    resp
+    let result = quorum_read(key.clone(), local_value.clone(), peers, read_quorum).await;
+    match result {
+        Ok(fresh) => {
+            state.metrics.kv_ops.with_label_values(&["get"]).inc();
+            state.metrics.requests.with_label_values(&["GET", "/key/:key", "200"]).inc();
+            let body = GetResp { value: fresh.data, ts: fresh.ts };
+            (axum::http::StatusCode::OK, Json(body)).into_response()
+        },
+        Err(()) => {
+            state.metrics.errors.with_label_values(&["quorum_read"]).inc();
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response()
+        }
+    }
 }
 
 async fn delete_key(
@@ -120,7 +145,8 @@ async fn delete_key(
     }
 
     let store = state.store;
-    let (status, resp): (axum::http::StatusCode, Response) = if let Some(_val) = store.delete(&key, ts, node_id).await {
+    let result = store.delete(&key, ts, node_id).await;
+    let (status, resp) = if result.is_some() {
         state.metrics.kv_ops.with_label_values(&["delete"]).inc();
         (axum::http::StatusCode::OK, axum::http::StatusCode::OK.into_response())
     } else {
@@ -128,8 +154,18 @@ async fn delete_key(
         (axum::http::StatusCode::NOT_FOUND, axum::http::StatusCode::NOT_FOUND.into_response())
     };
 
-    let leader_id = state.cluster.read().await.leader_id;
+    let cluster = state.cluster.read().await;
+    let peers = cluster.peer_addresses.clone();
+    let total_nodes = peers.len() + 1;
+    let write_quorum = (total_nodes / 2) + 1;
+    let leader_id = cluster.leader_id;
+    drop(cluster);
+
     if node_id == leader_id {
+        if let Err(()) = quorum_write(log_entry.clone(), peers, write_quorum).await {
+            state.metrics.errors.with_label_values(&["quorum_delete"]).inc();
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response();
+        }
         state.rep_tx.send(log_entry).await;
     }
 

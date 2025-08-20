@@ -9,7 +9,7 @@ distributed-key-value-store/
 │   ├── config.rs              # CLI args and config parsing
 │   ├── cluster/               # Cluster logic: leader election, peer health, quorum
 │   │   ├── mod.rs
-│   │   ├── peer.rs            # Peer representation & communication
+│   │   ├── state.rs           # Represents a node
 │   │   ├── election.rs        # Static-priority leader election
 │   │   └── quorum.rs          # Quorum read/write logic
 │   ├── store/                 # Key-value storage + persistence
