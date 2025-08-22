@@ -69,34 +69,34 @@ pub async fn quorum_read(
 
     for peer in peers {
         let key_clone = key.clone();
-        let url = format!("{}/key/{}", peer.trim_end_matches('/'), key_clone);
         let client_clone = client.clone();
+        let url = format!(
+            "{}/key/{}",
+            peer.trim_end_matches('/'),
+            key_clone
+        );
 
-        tasks.push(tokio::spawn(async move {
-            if let Ok(res) = timeout(Duration::from_secs(2), client_clone.get(&url).send()).await {
-                if let Ok(response) = res {
-                    if response.status().is_success() {
-                        if let Ok(json) = response.json::<serde_json::Value>().await {
-                            if let (Some(ts), Some(node_id)) = (
-                                json.get("ts").and_then(|v| v.as_u64()),
-                                json.get("node_id").and_then(|v| v.as_u64()),
-                            ) {
-                                let data = json
-                                    .get("data")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                return Some(Value { data, ts, node_id });
-                            }
+        tasks.push(async move {
+            match timeout(Duration::from_secs(2), client_clone.get(&url).send()).await {
+                Ok(Ok(resp)) if resp.status().is_success() => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let (Some(ts), Some(node_id)) = (
+                            json.get("ts").and_then(|v| v.as_u64()),
+                            json.get("node_id").and_then(|v| v.as_u64()),
+                        ) {
+                            let data = json.get("data").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            return Some(Value { data, ts, node_id });
                         }
                     }
                 }
+                _ => {}
             }
             None
-        }));
+        });
     }
 
-    while let Some(result) = tasks.next().await {
-        if let Ok(Some(val)) = result {
+    while let Some(maybe) = tasks.next().await {
+        if let Some(val) = maybe {
             responses.push(val);
         }
     }

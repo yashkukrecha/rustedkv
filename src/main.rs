@@ -44,7 +44,7 @@ fn spawn_heartbeat(cluster: Arc<RwLock<ClusterState>>) {
 
     tokio::spawn(async move {
         println!("Heartbeat task started");
-        let mut ticker = interval(Duration::from_secs(5));
+        let mut ticker = interval(Duration::from_secs(2));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH, Duration}};
 use prometheus::{Encoder, TextEncoder};
 use axum::{
     extract::{Path, State},
@@ -51,7 +51,7 @@ async fn put_key(
         // tests chaos injection
         wal.append(&log_entry).unwrap();
         if state.chaos_before_sync_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(state.chaos_before_sync_ms)).await;
+            tokio::time::sleep(Duration::from_millis(state.chaos_before_sync_ms)).await;
         }
         wal.sync().unwrap();
     }
@@ -82,8 +82,9 @@ async fn put_key(
 
 #[derive(Serialize, Deserialize)]
 pub struct GetResp {
-    value: Option<String>,
+    data: Option<String>,
     ts: u64,
+    node_id: u64,
 }
 
 async fn get_key(
@@ -96,7 +97,7 @@ async fn get_key(
         None => {
             let ts = 0;
             let node_id = state.cluster.read().await.node_id;
-            crate::store::Value { data: None, ts, node_id }
+            Value { data: None, ts, node_id }
         }
     };
 
@@ -104,7 +105,14 @@ async fn get_key(
     let peers = cluster.peer_addresses.clone();
     let total_nodes = peers.len() + 1;
     let read_quorum = (total_nodes / 2) + 1;
+    let leader_id = cluster.leader_id;
+    let node_id = cluster.node_id;
     drop(cluster);
+
+    if node_id != leader_id {
+        let body = GetResp { data: local_value.data, ts: local_value.ts, node_id: local_value.node_id };
+        return (axum::http::StatusCode::OK, Json(body)).into_response();
+    }
 
     let result = quorum_read(key.clone(), local_value.clone(), peers, read_quorum).await;
     match result {
@@ -116,7 +124,7 @@ async fn get_key(
             };
             state.metrics.kv_ops.with_label_values(&["get"]).inc();
             state.metrics.requests.with_label_values(&["GET", "/key/:key", "200"]).inc();
-            let body = GetResp { value: fresh.data, ts: fresh.ts };
+            let body = GetResp { data: fresh.data, ts: fresh.ts, node_id: fresh.node_id };
             (status, Json(body)).into_response()
         },
         Err(()) => {
@@ -168,7 +176,7 @@ async fn delete_key(
 
     if node_id == leader_id {
         if let Err(()) = quorum_write(log_entry.clone(), peers, write_quorum).await {
-            state.metrics.errors.with_label_values(&["quorum_delete"]).inc();
+            state.metrics.errors.with_label_values(&["quorum_write"]).inc();
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response();
         }
         state.rep_tx.send(log_entry).await;
